@@ -1,0 +1,6 @@
+# Ignore the autogen Manifest file
+Manifest.toml
+
+# Ignore a single file called test.jl, that can be used for running code in the REPL
+test.jl
+
