@@ -38,31 +38,42 @@ function clip!(image::Array{<:AbstractFloat,2})
 end
 
 # Finds the least squares solution to contrast*S + brightness = D
-function find_contrast_and_brightness(D,S)
+function find_contrast_and_brightness(D::Vector{Float64},S::Vector{Float64})
     A = hcat(ones(size(S)),S);
-    x = (transpose(A)*A)\(transpose(A)*D);
-    d = sum( (S*x[2] .+ x[1] - D).^2 );
+    x = (A'*A)\(A'*D);
+    d::Float64 = 0;
+    for i in eachindex(S)
+        d += (S[i]*x[2] + x[1] - D[i])^2;
+    end
     return d, x...;
 end
 
 # Naive block based fractal compression on a greyscale image
-function compress(image::Array{<:AbstractFloat,2}, s_size, d_size)
+function compress(image::Array{<:AbstractFloat,2}, s_size::Int64, d_size::Int64)
     n_s_blocks = size(image).÷s_size;
     n_d_blocks = size(image).÷d_size;
-    reduced_blocks = [fic.reduce(image[s_size*(i-1)+1:s_size*i,s_size*(j-1)+1:s_size*j], (d_size,d_size)) for i = 1:n_s_blocks[1], j = 1:n_s_blocks[2]];
+    reduced_blocks = Vector{Tuple{Int16,Int16,Bool,Int16,Vector{Float64}}}(undef, prod(n_s_blocks)*8);
+    i = 1
+    for k = 1:n_s_blocks[1], l = 1:n_s_blocks[2]
+        S = fic.reduce(image[s_size*(k-1)+1:s_size*k,s_size*(l-1)+1:s_size*l], (d_size,d_size));
+        for α in [0,90,180,270]
+            T = rotr90(S, α÷90);
+            reduced_blocks[i] = (k, l, false, α, vec(T));
+            reduced_blocks[i+1] = (k, l, true, α, vec(T[end:-1:1,:]));
+            i += 2;
+        end
+    end
     transformations = Matrix{Tuple{Int16,Int16,Bool,Int16,Float64,Float64}}(undef, n_d_blocks);
-    for i in 1:n_d_blocks[1], j in 1:n_d_blocks[2]
-        println("$(i)/$(n_d_blocks[1]) ; $(j)/$(n_d_blocks[2])");
-        min_d = Inf
-        D = image[d_size*(i-1)+1:d_size*i,d_size*(j-1)+1:d_size*j];
-        for k in 1:n_s_blocks[1], l in 1:n_s_blocks[2], flip in [false, true], α in [0,90,180,270]
-            S = rotr90(reduced_blocks[k,l],α÷90);
-            
-            flip && (S = S[end:-1:1,:]);
-            d, brightness, contrast = find_contrast_and_brightness(D[:],S[:]);
-            if d < min_d
-                min_d = d;
-                transformations[i,j] = (k,l,flip,α,contrast,brightness);
+    Threads.@threads for i in 1:n_d_blocks[1]
+        for j in 1:n_d_blocks[2]
+            min_d = Inf
+            D = vec(image[d_size*(i-1)+1:d_size*i,d_size*(j-1)+1:d_size*j]);
+            for (k, l, flip, α, S) in reduced_blocks
+                d, brightness, contrast = find_contrast_and_brightness(D,vec(S[:]));
+                if d < min_d
+                    min_d = d;
+                    transformations[i,j] = (k,l,flip,α,contrast,brightness);
+                end
             end
         end
     end
@@ -71,11 +82,10 @@ end
 
 # Naive block based fractal decompression for greyscale image
 # Returns a vector of images for each iteration of the transformation
-function decompress(transformations::Matrix{Tuple{Int16,Int16,Bool,Int16,Float64,Float64}}, s_size, d_size, n_iter) 
+function decompress(transformations::Matrix{Tuple{Int16,Int16,Bool,Int16,Float64,Float64}}, s_size::Int64, d_size::Int64, n_iter::Int64) 
     dims = size(transformations).*d_size;
     iterations = [rand(Float64,dims)];
     for it in 1:n_iter
-        println("$(it)/$(n_iter)");
         next_iter = zeros(dims);
         for i in axes(transformations,1), j in axes(transformations,2)
             k,l,flip,α,contrast,brightness = transformations[i,j];
