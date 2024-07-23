@@ -1,19 +1,18 @@
-using fic, FileIO, Images, Plots, Plots.PlotMeasures
+using fic, FileIO, Images, TestImages, Plots, Plots.PlotMeasures
 
-data = float64.(load("sample_images/monkey.gif"));
-data = fic.grayscale(data);
+data = imresize(float64.(testimage("mandrill")), (256,256));
 
 source_size = 8;
 destination_size = 4;
-transforms = fic.compress(data, source_size, destination_size);
+transforms = fic.compress_RGB(data, source_size, destination_size);
 n_iterations = 15;
-iterations = fic.decompress(transforms, source_size, destination_size, n_iterations);
+iterations = fic.decompress_RGB(transforms, source_size, destination_size, n_iterations);
 
 anim = @animate for im in iterations
     plot(im,axis=([],false),margins=0px,size=size(im));
 end
     
-gif(anim, "monkey_fps4.gif", fps=4);
+gif(anim, "mandrill_rgb_fps4.gif", fps=4);
 
 plot(assess_ssim.(iterations, [data]), 
         linewidth = 2, 
