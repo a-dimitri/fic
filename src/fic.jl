@@ -47,19 +47,20 @@ end
 # Gives a vector of top left co-ordinates, width and height of each source block
 function get_source_blocks(image::Array{Float64,2}, s_size::Int64)
     n_s_blocks = size(image).÷s_size;
-    source_blocks = Vector{Tuple{Int16,Int16,Int16,Int16}}(undef, prod(n_s_blocks));
+    source_blocks = Vector{Tuple{Int16,Int16,Int16,Int16,Float64}}(undef, prod(n_s_blocks));
     for k = 1:n_s_blocks[1], l = 1:n_s_blocks[2]
-        source_blocks[(k-1)*n_s_blocks[1] + l] = (k, l, s_size, s_size);
+        mean = sum(vec(image[1+(k-1)*s_size:k*s_size,1+(l-1)*s_size:l*s_size]));
+        source_blocks[(k-1)*n_s_blocks[1] + l] = (1+(k-1)*s_size, 1+(l-1)*s_size, s_size, s_size, mean);
     end
     return source_blocks;
 end
 
 # Redues all the source blocks to the size of the destination blocks
-function get_reduced_blocks(image::Array{Float64,2}, source_blocks::Vector{Tuple{Int16,Int16, Int16,Int16}}, d_size::Int64)
+function get_reduced_blocks(image::Array{Float64,2}, source_blocks::Vector{Tuple{Int16,Int16,Int16,Int16,Float64}}, d_size::Int64)
     reduced_blocks = Vector{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Vector{Float64}}}(undef, length(source_blocks)*8);
     i = 1
-    for (k, l, h, w) in source_blocks
-        S = fic.reduce(image[h*(k-1)+1:h*k,w*(l-1)+1:w*l], (d_size,d_size));
+    for (k, l, h, w, _) in source_blocks
+        S = fic.reduce(image[k:k+h-1,l:l+w-1], (d_size,d_size));
         for α in [0,90,180,270]
             T = rotr90(S, α÷90);
             reduced_blocks[i] = (k, l, h, w, false, α, vec(T));
@@ -127,7 +128,7 @@ end
 
 # Block based fractal compression on a greyscale image
 # Destination blocks are selected naively, while source blocks can be selected using different methods
-function compress(image::Array{Gray{Float64},2}, s_size::Int64, d_size::Int64)
+function compress_simple(image::Array{Gray{Float64},2}, s_size::Int64, d_size::Int64)
     image = copy(channelview(image));
     source_blocks = fic.get_source_blocks(image, s_size);
     reduced_blocks = fic.get_reduced_blocks(image, source_blocks, d_size);
@@ -149,9 +150,34 @@ function compress(image::Array{Gray{Float64},2}, s_size::Int64, d_size::Int64)
     return transformations;
 end
 
+function compress_quad_tree(image::Array{Gray{Float64},2}, s_size::Int64, std_threshold::Float64, d_size::Int64)
+    if std_threshold == 0
+        return compress_simple(image, s_size, d_size);
+    end
+    image = copy(channelview(image));
+    source_blocks = quad_tree_decomp(image, (s_size,s_size), std_threshold);
+    reduced_blocks = get_reduced_blocks(image, source_blocks, d_size);
+    n_d_blocks = size(image).÷d_size;
+    transformations = Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Float64,Float64}}(undef, n_d_blocks);
+    for i in 1:n_d_blocks[1]
+        for j in 1:n_d_blocks[2]
+            min_d = Inf
+            D = vec(image[d_size*(i-1)+1:d_size*i,d_size*(j-1)+1:d_size*j]);
+            for (k, l, h, w, flip, α, S) in reduced_blocks
+                d, brightness, contrast = find_contrast_and_brightness(D,vec(S[:]));
+                if d < min_d
+                    min_d = d;
+                    transformations[i,j] = (k,l,h,w,flip,α,contrast,brightness);
+                end
+            end
+        end
+    end
+    return transformations;
+end
+
 # Block based fractal decompression for greyscale image
 # Returns a vector of images for each iteration of the transformation
-function decompress(transformations::Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Float64,Float64}}, s_size::Int64, d_size::Int64, n_iter::Int64) 
+function decompress(transformations::Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Float64,Float64}}, d_size::Int64, n_iter::Int64) 
     dims = size(transformations).*d_size;
     iterations = [rand(Gray{Float64},dims)];
     for it in 1:n_iter
@@ -159,7 +185,7 @@ function decompress(transformations::Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,I
         next_iter = zeros(dims);
         for i in axes(transformations,1), j in axes(transformations,2)
             k,l,h,w,flip,α,contrast,brightness = transformations[i,j];
-            S = rotr90(fic.reduce(curr_iter[h*(k-1)+1:h*k,w*(l-1)+1:w*l], (d_size,d_size)),α÷90);
+            S = rotr90(fic.reduce(curr_iter[k:k+h-1,l:l+w-1], (d_size,d_size)),α÷90);
             flip && (S = S[end:-1:1,:]);
             next_iter[d_size*(i-1)+1:d_size*i,d_size*(j-1)+1:d_size*j] = S*contrast .+ brightness;
         end
@@ -169,11 +195,11 @@ function decompress(transformations::Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,I
 end
 
 function compress_RGB(image::Array{RGB{Float64},2}, s_size::Int64, d_size::Int64)
-    return compress.([Gray.(channelview(image)[i,:,:]) for i in 1:3], s_size, d_size);
+    return compress_simple.([Gray.(channelview(image)[i,:,:]) for i in 1:3], s_size, d_size);
 end
 
-function decompress_RGB(transformations::Vector{Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Float64,Float64}}}, s_size::Int64, d_size::Int64, n_iter::Int64)
-    iters = decompress.(transformations, s_size, d_size, n_iter);
+function decompress_RGB(transformations::Vector{Matrix{Tuple{Int16,Int16,Int16,Int16,Bool,Int16,Float64,Float64}}}, d_size::Int64, n_iter::Int64)
+    iters = decompress.(transformations, d_size, n_iter);
     return [colorview(RGB,iters[1][n], iters[2][n], iters[3][n]) for n in 1:n_iter];
 end
 
